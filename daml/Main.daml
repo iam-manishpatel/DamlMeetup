@@ -1,0 +1,761 @@
+module Main where
+
+import Daml.Script
+import DA.Date (toDateUTC, date, Month(Aug))
+import DA.Time (time)
+import DA.List()
+
+--ContractId type
+type GroupId = ContractId Group
+type GroupInvReqId = ContractId GroupInvitationRequest
+type GroupMemberId = ContractId GroupMember
+type GroupMemberMsgId = ContractId GroupMemberMessages
+type GroupMemberEventId = ContractId GroupMemberEvent
+type EventInvitationId = ContractId EventInvitation
+type EventRegisterId = ContractId EventRegister
+
+-- Enum type for different event types
+data EventType = Virtual|Hybrid|InPerson deriving (Eq, Show, Ord)
+
+----------------------------------------------------------------------
+-- UserData represents user information
+----------------------------------------------------------------------
+data UserData = UserData  with
+    user : Party
+    name : Text
+    email : Text
+    location : Text
+    mobile : Optional Text
+          deriving (Eq, Show, Ord)
+
+-- UserSignature class for generating user signatures
+class UserSignature usrAccount user o where
+    mySignature:usrAccount->user->o 
+
+-- Implement UserSignature for UserData type
+instance UserSignature UserData Party (Optional Text) where
+    mySignature usrAccount user = 
+      if (user==usrAccount.user) then 
+        Some ("Regards,\n" <> 
+            usrAccount.name <> 
+            "\nEmail: " <> usrAccount.email <> " | Mobile: " <> show(Some(usrAccount.mobile))) 
+      else None
+
+----------------------------------------------------------------------    
+-- GroupData represents group information
+----------------------------------------------------------------------
+data GroupData = GroupData with
+  groupId : Text
+  groupName : Text
+  groupOwner : UserData
+          deriving (Eq, Show, Ord)
+
+----------------------------------------------------------------------  
+--Group Template
+----------------------------------------------------------------------
+template Group with
+  group : GroupData
+    where
+      signatory group.groupOwner.user
+
+      ensure  group.groupId /=""
+
+      key (group.groupId,group.groupOwner.user):(Text,Party)
+      maintainer key._2
+
+      --Choice for Group Owner to send join invitation 
+      nonconsuming choice SendJoinInvitation:GroupInvReqId
+        with
+          invitee:UserData
+          note:Text
+        controller group.groupOwner.user
+        do
+            assertMsg "You cannot invite yourself!!!" (invitee.user /= group.groupOwner.user)
+            
+            create GroupInvitationRequest with 
+              groupReq = this
+              invitee = invitee
+              note =  note
+
+      --Owner can create event        
+      nonconsuming choice CreateEventByOwner:GroupMemberEventId
+          with
+            eventId : Text
+            eventTitle : Text
+            eventDescription : Text
+            eventDate : Date
+            eventTime : Time
+            eventLocation : Text
+            eventFees : Optional Decimal
+            eventType : EventType
+            eventCapacity : Int
+          controller group.groupOwner.user
+          do
+              now <- getTime 
+              let nowDate = toDateUTC now
+              assertMsg "Event Date must be in future" (eventDate > nowDate)
+              assertMsg "Event Capacity must be greater than zero" (eventCapacity>0)
+
+              create GroupMemberEvent with
+                eventOrganizer  = group.groupOwner.user
+                eventId = eventId
+                eventTitle = eventTitle
+                eventDescription = eventDescription
+                eventDate = eventDate
+                eventTime = eventTime
+                eventLocation = eventLocation
+                eventFees = eventFees
+                eventType = eventType
+                eventCapacity = eventCapacity
+
+----------------------------------------------------------------------
+--Join Group Invitation Request template
+----------------------------------------------------------------------
+template GroupInvitationRequest with
+  groupReq : Group
+  invitee : UserData
+  note : Text
+    where
+        signatory groupReq.group.groupOwner.user
+        observer  invitee.user
+
+        key (groupReq.group.groupId, groupReq.group.groupOwner.user,invitee.user)
+          :(Text,Party,Party)
+        
+        maintainer key._2
+
+        --Invitee accept the join group invitation 
+        choice AcceptJoinInvitation:GroupMemberId
+            with 
+              emailConsent:Bool  --Email Cosent
+            controller invitee.user
+            do
+                create GroupMember with 
+                    groupM=groupReq
+                    member = invitee
+                    emailConsent=emailConsent
+
+      --Invitee can reject the join group invitation 
+        choice RejectJoinInvitation:()
+            controller invitee.user
+            do return()
+
+----------------------------------------------------------------------
+--Group Member template
+----------------------------------------------------------------------
+template GroupMember with
+  groupM : Group
+  member : UserData
+  emailConsent : Bool
+    where 
+        signatory groupM.group.groupOwner.user --Group Owner
+        observer member.user --Group Member
+
+        key(groupM.group.groupId,groupM.group.groupOwner.user,member.user)
+          :(Text,Party,Party) --Group ID + Group Owner + Group Member
+        maintainer key._2
+
+        --Member can Leave the Group
+        choice LeaveGroup:()
+          controller member.user 
+          do 
+              return()
+
+        --Group Member can create event        
+        nonconsuming choice CreateEventByMember:GroupMemberEventId
+          with
+            eventId : Text
+            eventTitle : Text
+            eventDescription : Text
+            eventDate : Date
+            eventTime : Time
+            eventLocation : Text
+            eventFees : Optional Decimal
+            eventType : EventType
+            eventCapacity : Int
+          controller member.user
+          do 
+              now <- getTime 
+              let nowDate = toDateUTC now
+              assertMsg "Event Date must be in future" (eventDate > nowDate)
+              assertMsg "Event Capacity must be greater than zero" (eventCapacity>0)
+
+              create GroupMemberEvent with
+                eventOrganizer  = member.user
+                eventId = eventId
+                eventTitle = eventTitle
+                eventDescription = eventDescription
+                eventDate = eventDate
+                eventTime = eventTime
+                eventLocation = eventLocation
+                eventFees = eventFees
+                eventType = eventType
+                eventCapacity = eventCapacity
+
+        --Owner can send message to the Group Application member who has given email consent 
+        nonconsuming choice MessageByOwner:GroupMemberMsgId
+          with
+            emailTo : Party
+            emailSubject : Text
+            emailBody : Text
+          controller groupM.group.groupOwner.user  
+          do
+            assertMsg "You can send message to yourself!!" (groupM.group.groupOwner.user/=emailTo)
+
+            (gm_cid,gm_payload) <-fetchByKey @GroupMember (groupM.group.groupId,groupM.group.groupOwner.user,emailTo)
+        
+            assertMsg "You can not send message as recipient has not granted email consent." (gm_payload.emailConsent)
+
+            create GroupMemberMessages with 
+                    from = groupM.group.groupOwner.user
+                    to = emailTo
+                    fromEmail=groupM.group.groupOwner.email
+                    toEmail=groupM.group.groupOwner.email
+                    subject = emailSubject
+                    body = emailBody
+
+----------------------------------------------------------------------
+--Message template                  
+----------------------------------------------------------------------
+template GroupMemberMessages with
+  from : Party
+  to : Party
+  fromEmail:Text
+  toEmail:Text
+  subject : Text
+  body : Text
+    where
+      signatory from
+      observer to
+
+----------------------------------------------------------------------
+--Event template
+----------------------------------------------------------------------
+template GroupMemberEvent with
+    eventOrganizer : Party
+    eventId : Text
+    eventTitle : Text
+    eventDescription : Text
+    eventDate : Date
+    eventTime : Time
+    eventLocation : Text
+    eventFees : Optional Decimal
+    eventType : EventType
+    eventCapacity : Int
+  where
+    signatory eventOrganizer
+
+    key(eventId,eventOrganizer):(Text,Party) --Event ID + Organizer
+    maintainer key._2
+    
+    ensure (eventCapacity > 0)
+
+    --Organizer can Cancel Event
+    choice CancelEvent:()
+      controller eventOrganizer
+      do 
+          return()
+
+    --Organizer can mark Event complete successfully
+    choice CompleteEvent:()
+      controller eventOrganizer
+      do 
+          return()
+
+
+    --Organizer can invite other party to attend Event
+    nonconsuming choice InviteToEvent:EventInvitationId
+        with
+          eventInvitee : Party
+          eventNote:Text
+        controller eventOrganizer
+        do
+            assertMsg "You cannot invite yourself!!!" (eventInvitee /= eventOrganizer)
+            
+            create EventInvitation with 
+              eventReq = this
+              invitee = eventInvitee
+              eventNote =  eventNote
+
+    --Organizer can bulk invite other parties to attend Event
+    nonconsuming choice BulkInviteToEvent:[EventInvitationId]
+        with
+          eventInvitee : [Party]
+          eventNote:Text
+        controller eventOrganizer
+        do
+            inviteCids <- mapA(\invitee-> create EventInvitation with 
+                eventReq = this
+                invitee = invitee
+                eventNote =  eventNote) eventInvitee
+
+            return(inviteCids)
+
+----------------------------------------------------------------------
+--Event Invitation Request template
+----------------------------------------------------------------------
+template EventInvitation with
+  eventReq : GroupMemberEvent
+  invitee : Party
+  eventNote : Text
+    where
+        signatory eventReq.eventOrganizer
+        observer  invitee
+
+        key (eventReq.eventId, eventReq.eventOrganizer,invitee)
+          :(Text,Party,Party)
+        
+        maintainer key._2
+
+          -- Invitee accepts the event invitation
+        choice RegisterForEvent: EventRegisterId
+            with 
+              emailConsent:Bool  --Email Cosent
+            controller invitee
+            do
+                create EventRegister with 
+                    eventR=eventReq
+                    attendee = invitee
+                    emailConsent=emailConsent
+
+      --Invitee can reject the event invitation 
+        choice RejectEventInvitation:()
+            controller invitee
+            do return()
+
+----------------------------------------------------------------------
+--Register for Event template
+----------------------------------------------------------------------
+template EventRegister with
+  eventR : GroupMemberEvent
+  attendee : Party
+  emailConsent : Bool
+    where 
+        signatory eventR.eventOrganizer --Event Organizer
+        observer attendee --Attendee
+
+        key(eventR.eventId,eventR.eventOrganizer,attendee)
+          :(Text,Party,Party) --Group ID + Group Owner + Group Member
+        maintainer key._2
+        
+        --Attendee can cancel their event registration
+        choice CancelRegistration:()
+            controller attendee 
+            do 
+              now <- getTime 
+              let nowDate = toDateUTC now
+
+              assertMsg "Event Date must be in the future" (eventR.eventDate > nowDate)
+              
+              return()
+
+----------------------------------------------------------------------
+-- Function to setup group owner users
+----------------------------------------------------------------------
+setupGroupUsers : Script (UserData,UserData)
+setupGroupUsers = do
+   -- Allocate a party
+    ---Group Owner
+    grpOwner_DA <- allocatePartyWithHint "DA" (PartyIdHint "DA")
+    grpOwner_DXC <- allocatePartyWithHint "DXC" (PartyIdHint "DXC")
+    
+    -- construct user-ids from text 
+    daId  <-validateUserId "DA"
+    dxcId <- validateUserId "DXC"
+    
+    -- create users with the given rights 
+    createUser (User daId (Some grpOwner_DA)) [CanActAs grpOwner_DA]
+    createUser (User dxcId (Some grpOwner_DXC)) [CanActAs grpOwner_DXC]
+    
+    -- Create an instance of UserData record
+    let 
+      usr1 = UserData with
+            user = grpOwner_DA
+            name = "Digital Asset"
+            email = "xyz001@da.com"
+            location = "NYC"
+            mobile = None
+
+      usr2 = UserData with
+            user = grpOwner_DXC
+            name = "DXC Technology"
+            email = "dxc001@dxc.com"
+            location = "Bengaluru"
+            mobile = Some "+91 9901 854434"
+
+    return(usr1,usr2)
+
+----------------------------------------------------------------------
+-- Function to setup group member users
+----------------------------------------------------------------------
+setupMemberUsers : Script (UserData,UserData,UserData,UserData,UserData)
+setupMemberUsers = do
+   -- Allocate a party
+    member_Alice <- allocatePartyWithHint "Alice" (PartyIdHint "Alice")
+    member_Bob <- allocatePartyWithHint "Bob" (PartyIdHint "Bob")
+    member_Nikee <- allocatePartyWithHint "Nikee" (PartyIdHint "Nikee")
+    member_Uma <- allocatePartyWithHint "Uma" (PartyIdHint "Uma")
+    member_Manish <- allocatePartyWithHint "Manish" (PartyIdHint "Manish")
+
+    -- construct user-ids from text 
+    aliceId <- validateUserId "Alice"
+    bobId <- validateUserId "Bob"
+    nikeeId <- validateUserId "Nikee"
+    umaId <- validateUserId "Uma"
+    manishId <- validateUserId "Manish"
+
+    -- create users with the given rights 
+    createUser (User aliceId (Some member_Alice)) [CanActAs member_Alice]
+    createUser (User bobId (Some member_Bob)) [CanActAs member_Bob]
+    createUser (User nikeeId (Some member_Nikee)) [CanActAs member_Nikee]
+    createUser (User umaId (Some member_Uma)) [CanActAs member_Uma]
+    createUser (User manishId (Some member_Manish)) [CanActAs member_Manish]
+
+    -- Create an instance of UserData record
+    let 
+      usr3 = UserData with
+            user = member_Alice
+            name = "Alice"
+            email = "xyz002@da.com"
+            location = "NYC"
+            mobile = None
+
+      usr4 = UserData with
+            user = member_Bob
+            name = "Bob"
+            email = "xyz003@da.com"
+            location = "NYC"
+            mobile = None
+    
+      usr5 = UserData with
+            user = member_Nikee
+            name = "Nikee"
+            email = "xyz003@dxc.com"
+            location = "ZURICH"
+            mobile = None
+    
+      usr6 = UserData with
+            user = member_Uma
+            name = "Uma"
+            email = "xyz003@dxc.com"
+            location = "Hyderabad, India"
+            mobile = None
+    
+      usr7 = UserData with
+            user = member_Manish
+            name = "Manish"
+            email = "manish.patel@dxc.com"
+            location = "Bengaluru, India"
+            mobile = None
+
+    return(usr3,usr4,usr5,usr6,usr7)
+
+----------------------------------------------------------------------
+-- init script
+----------------------------------------------------------------------
+setup = script do
+    ---- Get instance of UserData record
+    (usr1,usr2) <- setupGroupUsers
+    (usr3,usr4,usr5,usr6,usr7) <- setupMemberUsers
+
+    -- Create an instance of GroupData record
+    let 
+      grp1 = GroupData with
+            groupId = "DA001"
+            groupName = "DAML Learning" 
+            groupOwner = usr1
+
+      grp2 = GroupData with
+            groupId = "DXC001"
+            groupName = "DXC India Learning" 
+            groupOwner = usr2
+ 
+      -- Generate user signatures
+      signusr1 : Optional Text = mySignature usr1 usr1.user
+      signusr2 : Optional Text = mySignature usr2 usr2.user
+
+    ----------------------------------------------------------------------
+    -- Group owner create the Group
+    ----------------------------------------------------------------------
+    -- Create Group contracts
+    grpid1 <- submit usr1.user do
+            createCmd Group with
+                group = grp1
+    
+    -- Unhappy Path 1: Commit error due to unique key violation for key
+    _ <- submitMustFail usr1.user do
+            createCmd Group with
+                group = grp1
+           
+    grpid2 <- submit usr2.user do
+        createCmd Group with
+            group = grp2
+
+    ----------------------------------------------------------------------    
+    -- Group Owner DA send the invitation to join the Digital Asset group
+    ----------------------------------------------------------------------
+    inviteID1_1 <- submit usr1.user do
+            exerciseCmd grpid1 SendJoinInvitation with 
+              invitee = usr3
+              note = "Hi "<>show usr3.user<>", You can join us on one of our live streams." <> show signusr1
+    
+    --Unhappy Path 2 : Group owner can not invite himself.       
+    _ <- submitMustFail usr1.user do
+            exerciseCmd grpid1 SendJoinInvitation with 
+              invitee = usr1
+              note = "Hi "<>show usr1.user<>", You can join us on one of our live streams." <> show signusr1
+
+
+    inviteID1_2 <- submit usr1.user do
+        exerciseCmd grpid1 SendJoinInvitation with 
+            invitee = usr4
+            note = "Hi "<>show usr4.user<>", You can join us on one of our live streams." <> show signusr1
+    
+    inviteID1_3 <- submit usr1.user do
+        exerciseCmd grpid1 SendJoinInvitation with 
+            invitee = usr5
+            note = "Hi "<>show usr5.user<>", You can join us on one of our live streams." <> show signusr1
+
+    ----------------------------------------------------------------------
+    --Group Owner DXC send the invitation to Join DXC Group
+    ----------------------------------------------------------------------
+    inviteID2_1 <- submit usr2.user do
+        exerciseCmd grpid2 SendJoinInvitation with 
+            invitee = usr5
+            note = "Hi "<>show usr4.user<>", You can join us on one of our live streams." <> show signusr2
+           
+    inviteID2_2 <- submit usr2.user do
+        exerciseCmd grpid2 SendJoinInvitation with 
+            invitee = usr6
+            note = "Hi "<>show usr6.user<>", You can join us on one of our live streams." <> show signusr2
+    
+    inviteID2_3 <- submit usr2.user do
+        exerciseCmd grpid2 SendJoinInvitation with 
+            invitee = usr7
+            note = "Hi "<>show usr7.user<>", You can join us on one of our live streams." <> show signusr2
+
+    ----------------------------------------------------------------------
+    --Invitee accept the invitation and join the group 1
+    ----------------------------------------------------------------------
+
+    inviteID1_1_1<- submit usr3.user  do 
+        exerciseCmd inviteID1_1 AcceptJoinInvitation with emailConsent = True
+
+  -- Unhappy Path 3 : Attempt to exercise a consumed contract
+    _<- submitMustFail usr2.user do 
+        exerciseCmd inviteID1_1 AcceptJoinInvitation with emailConsent = True
+
+    inviteID1_2_1<- submit usr4.user do 
+        exerciseCmd inviteID1_2 AcceptJoinInvitation with emailConsent = True
+
+
+    ----------------------------------------------------------------------
+    --Invitee accept the invitation and join the group 2
+    ----------------------------------------------------------------------
+
+    inviteID2_1_1<- submit usr5.user  do 
+        exerciseCmd inviteID2_1 AcceptJoinInvitation with emailConsent = True
+
+    -- Unhappy Path 4 : Attempt to exercise a consumed contract
+    _<- submitMustFail usr6.user do 
+        exerciseCmd inviteID2_1 AcceptJoinInvitation with emailConsent = True
+
+    ----------------------------------------------------------------------        
+    -- User reject the invitaion to join the Group 2
+    ----------------------------------------------------------------------
+    inviteID2_3_Reject <- submit usr7.user do
+          exerciseCmd inviteID2_3 RejectJoinInvitation
+
+    ----------------------------------------------------------------------
+    --Leave the group
+    ----------------------------------------------------------------------
+    Some (cidGroupMember,_)<-queryContractKey @GroupMember usr5.user ("DXC001",usr2.user,usr5.user)
+    retS <- submit usr5.user do exerciseCmd cidGroupMember LeaveGroup
+    
+    ----------------------------------------------------------------------
+    --Grop Owner send message to the member
+    ----------------------------------------------------------------------
+    Some (cidGroupMember,_)<-queryContractKey @GroupMember usr1.user ("DA001",usr1.user,usr4.user)
+    
+    _<- submit usr1.user do 
+        exerciseCmd cidGroupMember MessageByOwner with
+            emailTo = usr4.user
+            emailSubject = "DAML Invitation"
+            emailBody = "You are invited for Smart Contract Hackathon With DXC."
+   
+    ----------------------------------------------------------------------
+    --Grop Owner create the event
+    ----------------------------------------------------------------------
+    event1<- submit usr1.user do
+        exerciseCmd grpid1 CreateEventByOwner with
+            eventId = "E001"
+            eventTitle = "DAML Hackathon"
+            eventDescription = "You are invited for Smart Contract Hackathon With DXC."
+            eventDate =  date 2023 Aug 15
+            eventTime = time(date 2023 Aug 15) 00 00 00
+            eventLocation = "Virtual"
+            eventFees = None
+            eventType = Virtual
+            eventCapacity = 100
+
+    -- Unhappy Path 5 : Event Date must be in future
+    _<- submitMustFail usr1.user do
+        exerciseCmd grpid1 CreateEventByOwner with
+            eventId = "E001-1"
+            eventTitle = "DAML Hackathon"
+            eventDescription = "You are invited for Smart Contract Hackathon With DXC."
+            eventDate =  date 1969 Aug 15
+            eventTime = time(date 1969 Aug 15) 00 00 00
+            eventLocation = "Virtual"
+            eventFees = None
+            eventType = Virtual
+            eventCapacity = 100
+
+    -- Unhappy Path 6 : Event Capacity must be greater than zero
+    _<- submitMustFail usr1.user do
+        exerciseCmd grpid1 CreateEventByOwner with
+            eventId = "E001-2"
+            eventTitle = "DAML Hackathon"
+            eventDescription = "You are invited for Smart Contract Hackathon With DXC."
+            eventDate =  date 2023 Aug 15
+            eventTime = time(date 2023 Aug 15) 00 00 00
+            eventLocation = "Virtual"
+            eventFees = None
+            eventType = Virtual
+            eventCapacity = 0
+
+    -- Unhappy Path 7 : Commit error due to unique key violation for key
+    _<- submitMustFail usr1.user do
+        exerciseCmd grpid1 CreateEventByOwner with
+            eventId = "E001"
+            eventTitle = "AWS PartnerCast"
+            eventDescription = "You are invited to register AWS PartnerCast - AppMod Serverless Series 2023 (Technical)"
+            eventDate =  date 1969 Aug 15
+            eventTime = time(date 1969 Aug 15) 00 00 00
+            eventLocation = "Virtual"
+            eventFees = None  
+            eventType = Virtual
+            eventCapacity = 100
+
+    ----------------------------------------------------------------------
+    --Grop member create the event
+    ----------------------------------------------------------------------
+    event2<- submit usr4.user do
+        exerciseCmd inviteID1_2_1 CreateEventByMember with
+            eventId = "E002"
+            eventTitle = "AWS PartnerCast"
+            eventDescription = "You are invited to register AWS PartnerCast - AppMod Serverless Series 2023 (Technical) "
+            eventDate =  date 2023 Aug 15
+            eventTime = time(date 2023 Aug 15) 00 00 00
+            eventLocation = "India"
+            eventFees = None
+            eventType = InPerson
+            eventCapacity = 20
+
+    -- Unhappy Path 8 :   Event date must be in future
+    _<- submitMustFail usr4.user do
+        exerciseCmd inviteID1_2_1 CreateEventByMember with
+            eventId = "E002-1"
+            eventTitle = "AWS PartnerCast"
+            eventDescription = "You are invited to register AWS PartnerCast - AppMod Serverless Series 2023 (Technical)"
+            eventDate =  date 1969 Aug 15
+            eventTime = time(date 1969 Aug 15) 00 00 00
+            eventLocation = "India"
+            eventFees = None
+            eventType = InPerson
+            eventCapacity = 20
+
+    -- Unhappy Path 9 : Commit error due to unique key violation for key
+    _<- submitMustFail usr4.user do
+        exerciseCmd inviteID1_2_1 CreateEventByMember with
+            eventId = "E002"
+            eventTitle = "AWS PartnerCast"
+            eventDescription = "You are invited to register AWS PartnerCast - AppMod Serverless Series 2023 (Technical)"
+            eventDate =  date 2023 Aug 15
+            eventTime = time(date 2023 Aug 15) 00 00 00
+            eventLocation = "India"
+            eventFees = None
+            eventType = InPerson
+            eventCapacity = 20
+
+    ----------------------------------------------------------------------
+    --Cancel event
+    ----------------------------------------------------------------------
+    _<- submit usr4.user do
+        exerciseCmd event2 CancelEvent
+    
+    -- Unhappy Path 10 : Attempt to exercise a consumed contract
+    _<- submitMustFail usr4.user do
+        exerciseCmd event2 CancelEvent
+    
+    -- Unhappy Path 11 : Attempt to fetch or exercise a contract not visible to the reading parties.
+    _<- submitMustFail usr4.user do
+        exerciseCmd event1 CancelEvent
+
+    ----------------------------------------------------------------------
+    --InviteToEvent
+    ---------------------------------------------------------------------- 
+    event1_1 <- submit usr1.user do
+        exerciseCmd event1 InviteToEvent with eventInvitee = usr3.user, eventNote = "Don't miss this Hackathon!! We have limited seat, so please register ASAP."
+    
+    event1_2 <- submit usr1.user do
+        exerciseCmd event1 InviteToEvent with eventInvitee = usr4.user, eventNote = "Don't miss this Hackathon!! We have limited seat, so please register ASAP."
+    
+    event1_3 <- submit usr1.user do
+        exerciseCmd event1 InviteToEvent with eventInvitee = usr5.user, eventNote = "Don't miss this Hackathon!! We have limited seat, so please register ASAP."
+    
+    event1_4 <- submit usr1.user do
+        exerciseCmd event1 InviteToEvent with eventInvitee = usr2.user, eventNote = "Don't miss this Hackathon!! We have limited seat, so please register ASAP."
+
+    -- Unhappy Path 12 : unique key violation
+    _<- submitMustFail usr1.user do
+        exerciseCmd event1 InviteToEvent with eventInvitee = usr5.user, eventNote = "Don't miss this Hackathon!! We have limited seat, so please register ASAP."
+    
+    -- Unhappy Path 13 : You cannot invite yourself
+    _<- submitMustFail usr1.user do
+        exerciseCmd event1 InviteToEvent with eventInvitee = usr1.user, eventNote = "Don't miss this Hackathon!! We have limited seat, so please register ASAP."
+
+    
+    --BulkInviteToEvent
+    let inviteeList:[Party] = [usr6.user,usr7.user]
+
+    event1_5 <- submit usr1.user do
+        exerciseCmd event1 BulkInviteToEvent with eventInvitee = inviteeList, eventNote = "Don't miss this Hackathon!! - Bulk"
+
+    ----------------------------------------------------------------------
+    --RejectEventInvitation
+    ----------------------------------------------------------------------
+    event1_4_1 <- submit usr2.user do
+        exerciseCmd event1_4 RejectEventInvitation
+
+    ----------------------------------------------------------------------
+    --RegisterForEvent 
+    ----------------------------------------------------------------------
+    event1_1_1 <- submit usr3.user do
+        exerciseCmd event1_1 RegisterForEvent with emailConsent = True
+
+    event1_2_1 <- submit usr4.user do
+        exerciseCmd event1_2 RegisterForEvent with emailConsent = False
+
+    event1_3_1 <- submit usr5.user do
+        exerciseCmd event1_3 RegisterForEvent with emailConsent = True
+    
+    -- Unhappy Path 14 : Attempt to exercise a consumed contract
+    _<- submitMustFail usr5.user do
+        exerciseCmd event1_1 RegisterForEvent with emailConsent = True
+
+    ----------------------------------------------------------------------
+    --CancelRegistration
+    ----------------------------------------------------------------------
+    event1_3_1_1 <- submit usr5.user do
+        exerciseCmd event1_3_1 CancelRegistration
+
+  ----------------------------------------------------------------------
+  -- Complete Event
+  ----------------------------------------------------------------------
+    testm <- submit usr1.user do
+        exerciseCmd event1 CompleteEvent
+  
+    return()
+
+--End
