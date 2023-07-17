@@ -4,7 +4,7 @@ DamlMeetup is an application built on DAML that offers a platform for group mana
 ### I. Overview 
 This project was created by using the `empty-skeleton` template. Invite/Accept design pattern is used to create this DAML application.
 
-Group owners can invite members to join their groups and send invitations to users. Users can accept or reject invitations, creating a GroupMember contract upon acceptance. Both owners and members can create events, send event invitations to individuals or in bulk, and users can accept, register, or cancel event registrations. Group organizers have the ability to cancel events.
+Group owners can invite members to join their groups and send invitations to users. Users can accept or reject invitations, creating a GroupMember contract upon acceptance. Both owners and members can create events, send event invitations to individuals or in bulk, and users can accept, register, or cancel event registrations. Event rganizers have the ability to cancel events.
 
 
 ### II. Workflow
