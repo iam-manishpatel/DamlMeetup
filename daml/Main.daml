@@ -1,3 +1,6 @@
+--DamlMeetup is an application built on DAML that offers a platform for group management 
+--and event organization.
+----------------------------------------------------------------------------------------
 module Main where
 
 import Daml.Script
