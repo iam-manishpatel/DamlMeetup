@@ -1,0 +1,225 @@
+module Group where
+
+import Event
+
+import DA.Date (toDateUTC)
+import DA.List()
+
+
+--ContractId type
+type GroupId = ContractId Group
+type GroupInvReqId = ContractId GroupInvitationRequest
+type GroupMemberId = ContractId GroupMember
+type GroupMemberMsgId = ContractId GroupMemberMessages
+
+
+----------------------------------------------------------------------
+-- UserData represents user information
+----------------------------------------------------------------------
+data UserData = UserData  with
+    user : Party
+    name : Text
+    email : Text
+    location : Text
+    mobile : Optional Text
+          deriving (Eq, Show, Ord)
+
+-- UserSignature class for generating user signatures
+class UserSignature usrAccount user o where
+    mySignature:usrAccount->user->o 
+
+-- Implement UserSignature for UserData type
+instance UserSignature UserData Party (Optional Text) where
+    mySignature usrAccount user = 
+      if (user==usrAccount.user) then 
+        Some ("Regards,\n" <> 
+            usrAccount.name <> 
+            "\nEmail: " <> usrAccount.email <> " | Mobile: " <> show(Some(usrAccount.mobile))) 
+      else None
+
+----------------------------------------------------------------------    
+-- GroupData represents group information
+----------------------------------------------------------------------
+data GroupData = GroupData with
+  groupId : Text
+  groupName : Text
+  groupOwner : UserData
+          deriving (Eq, Show, Ord)
+
+----------------------------------------------------------------------  
+--Group Template
+----------------------------------------------------------------------
+template Group with
+  group : GroupData
+    where
+      signatory group.groupOwner.user
+
+      ensure  group.groupId /=""
+
+      key (group.groupId,group.groupOwner.user):(Text,Party)
+      maintainer key._2
+
+      --Choice for Group Owner to send join invitation 
+      nonconsuming choice SendJoinInvitation:GroupInvReqId
+        with
+          invitee:UserData
+          note:Text
+        controller group.groupOwner.user
+        do
+            assertMsg "You cannot invite yourself!!!" (invitee.user /= group.groupOwner.user)
+            
+            create GroupInvitationRequest with 
+              groupReq = this
+              invitee = invitee
+              note =  note
+
+      --Owner can create event        
+      nonconsuming choice CreateEventByOwner:GroupMemberEventId
+          with
+            eventId : Text
+            eventTitle : Text
+            eventDescription : Text
+            eventDate : Date
+            eventTime : Time
+            eventLocation : Text
+            eventFees : Optional Decimal
+            eventType : EventType
+            eventCapacity : Int
+          controller group.groupOwner.user
+          do
+              now <- getTime 
+              let nowDate = toDateUTC now
+              assertMsg "Event Date must be in future" (eventDate > nowDate)
+              assertMsg "Event Capacity must be greater than zero" (eventCapacity>0)
+
+              create GroupMemberEvent with
+                eventOrganizer  = group.groupOwner.user
+                eventId = eventId
+                eventTitle = eventTitle
+                eventDescription = eventDescription
+                eventDate = eventDate
+                eventTime = eventTime
+                eventLocation = eventLocation
+                eventFees = eventFees
+                eventType = eventType
+                eventCapacity = eventCapacity
+
+----------------------------------------------------------------------
+--Join Group Invitation Request template
+----------------------------------------------------------------------
+template GroupInvitationRequest with
+  groupReq : Group
+  invitee : UserData
+  note : Text
+    where
+        signatory groupReq.group.groupOwner.user
+        observer  invitee.user
+
+        key (groupReq.group.groupId, groupReq.group.groupOwner.user,invitee.user)
+          :(Text,Party,Party)
+        
+        maintainer key._2
+
+        --Invitee accept the join group invitation 
+        choice AcceptJoinInvitation:GroupMemberId
+            with 
+              emailConsent:Bool  --Email Cosent
+            controller invitee.user
+            do
+                create GroupMember with 
+                    groupM=groupReq
+                    member = invitee
+                    emailConsent=emailConsent
+
+      --Invitee can reject the join group invitation 
+        choice RejectJoinInvitation:()
+            controller invitee.user
+            do return()
+
+----------------------------------------------------------------------
+--Group Member template
+----------------------------------------------------------------------
+template GroupMember with
+  groupM : Group
+  member : UserData
+  emailConsent : Bool
+    where 
+        signatory groupM.group.groupOwner.user --Group Owner
+        observer member.user --Group Member
+
+        key(groupM.group.groupId,groupM.group.groupOwner.user,member.user)
+          :(Text,Party,Party) --Group ID + Group Owner + Group Member
+        maintainer key._2
+
+        --Member can Leave the Group
+        choice LeaveGroup:()
+          controller member.user 
+          do 
+              return()
+
+        --Group Member can create event        
+        nonconsuming choice CreateEventByMember:GroupMemberEventId
+          with
+            eventId : Text
+            eventTitle : Text
+            eventDescription : Text
+            eventDate : Date
+            eventTime : Time
+            eventLocation : Text
+            eventFees : Optional Decimal
+            eventType : EventType
+            eventCapacity : Int
+          controller member.user
+          do 
+              now <- getTime 
+              let nowDate = toDateUTC now
+              assertMsg "Event Date must be in future" (eventDate > nowDate)
+              assertMsg "Event Capacity must be greater than zero" (eventCapacity>0)
+
+              create GroupMemberEvent with
+                eventOrganizer  = member.user
+                eventId = eventId
+                eventTitle = eventTitle
+                eventDescription = eventDescription
+                eventDate = eventDate
+                eventTime = eventTime
+                eventLocation = eventLocation
+                eventFees = eventFees
+                eventType = eventType
+                eventCapacity = eventCapacity
+
+        --Owner can send message to the Group Application member who has given email consent 
+        nonconsuming choice MessageByOwner:GroupMemberMsgId
+          with
+            emailTo : Party
+            emailSubject : Text
+            emailBody : Text
+          controller groupM.group.groupOwner.user  
+          do
+            assertMsg "You can send message to yourself!!" (groupM.group.groupOwner.user/=emailTo)
+
+            (gm_cid,gm_payload) <-fetchByKey @GroupMember (groupM.group.groupId,groupM.group.groupOwner.user,emailTo)
+        
+            assertMsg "You can not send message as recipient has not granted email consent." (gm_payload.emailConsent)
+
+            create GroupMemberMessages with 
+                    from = groupM.group.groupOwner.user
+                    to = emailTo
+                    fromEmail=groupM.group.groupOwner.email
+                    toEmail=groupM.group.groupOwner.email
+                    subject = emailSubject
+                    body = emailBody
+
+----------------------------------------------------------------------
+--Message template                  
+----------------------------------------------------------------------
+template GroupMemberMessages with
+  from : Party
+  to : Party
+  fromEmail:Text
+  toEmail:Text
+  subject : Text
+  body : Text
+    where
+      signatory from
+      observer to

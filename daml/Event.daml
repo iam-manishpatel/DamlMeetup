@@ -1,0 +1,135 @@
+module Event where
+
+import DA.Date (toDateUTC)
+import DA.List()
+
+--ContractId type
+type GroupMemberEventId = ContractId GroupMemberEvent
+type EventInvitationId = ContractId EventInvitation
+type EventRegisterId = ContractId EventRegister
+
+
+-- Enum type for different event types
+data EventType = Virtual|Hybrid|InPerson deriving (Eq, Show, Ord)
+
+
+----------------------------------------------------------------------
+--Event template
+----------------------------------------------------------------------
+template GroupMemberEvent with
+    eventOrganizer : Party
+    eventId : Text
+    eventTitle : Text
+    eventDescription : Text
+    eventDate : Date
+    eventTime : Time
+    eventLocation : Text
+    eventFees : Optional Decimal
+    eventType : EventType
+    eventCapacity : Int
+  where
+    signatory eventOrganizer
+
+    key(eventId,eventOrganizer):(Text,Party) --Event ID + Organizer
+    maintainer key._2
+    
+    ensure (eventCapacity > 0)
+
+    --Organizer can Cancel Event
+    choice CancelEvent:()
+      controller eventOrganizer
+      do 
+          return()
+
+    --Organizer can mark Event complete successfully
+    choice CompleteEvent:()
+      controller eventOrganizer
+      do 
+          return()
+
+
+    --Organizer can invite other party to attend Event
+    nonconsuming choice InviteToEvent:EventInvitationId
+        with
+          eventInvitee : Party
+          eventNote:Text
+        controller eventOrganizer
+        do
+            assertMsg "You cannot invite yourself!!!" (eventInvitee /= eventOrganizer)
+            
+            create EventInvitation with 
+              eventReq = this
+              invitee = eventInvitee
+              eventNote =  eventNote
+
+    --Organizer can bulk invite other parties to attend Event
+    nonconsuming choice BulkInviteToEvent:[EventInvitationId]
+        with
+          eventInvitee : [Party]
+          eventNote:Text
+        controller eventOrganizer
+        do
+            inviteCids <- mapA(\invitee-> create EventInvitation with 
+                eventReq = this
+                invitee = invitee
+                eventNote =  eventNote) eventInvitee
+
+            return(inviteCids)
+
+----------------------------------------------------------------------
+--Event Invitation Request template
+----------------------------------------------------------------------
+template EventInvitation with
+  eventReq : GroupMemberEvent
+  invitee : Party
+  eventNote : Text
+    where
+        signatory eventReq.eventOrganizer
+        observer  invitee
+
+        key (eventReq.eventId, eventReq.eventOrganizer,invitee)
+          :(Text,Party,Party)
+        
+        maintainer key._2
+
+          -- Invitee accepts the event invitation
+        choice RegisterForEvent: EventRegisterId
+            with 
+              emailConsent:Bool  --Email Cosent
+            controller invitee
+            do
+                create EventRegister with 
+                    eventR=eventReq
+                    attendee = invitee
+                    emailConsent=emailConsent
+
+      --Invitee can reject the event invitation 
+        choice RejectEventInvitation:()
+            controller invitee
+            do return()
+
+----------------------------------------------------------------------
+--Register for Event template
+----------------------------------------------------------------------
+template EventRegister with
+  eventR : GroupMemberEvent
+  attendee : Party
+  emailConsent : Bool
+    where 
+        signatory eventR.eventOrganizer --Event Organizer
+        observer attendee --Attendee
+
+        key(eventR.eventId,eventR.eventOrganizer,attendee)
+          :(Text,Party,Party) --Group ID + Group Owner + Group Member
+        maintainer key._2
+        
+        --Attendee can cancel their event registration
+        choice CancelRegistration:()
+            controller attendee 
+            do 
+              now <- getTime 
+              let nowDate = toDateUTC now
+
+              assertMsg "Event Date must be in the future" (eventR.eventDate > nowDate)
+              
+              return()
